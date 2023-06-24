@@ -9,60 +9,42 @@ extern crate r2d2_diesel;
 #[macro_use]
 extern crate serde_derive;
 
-use diesel::pg::PgConnection;
-use diesel::prelude::*;
-use irc::{client::{prelude::*}};
 use anyhow::Result;
 use futures::prelude::*;
+use irc::client::prelude::*;
 
 use dotenv::dotenv;
 use models::NewUser;
-use std::env;
 use std::time::SystemTime;
 
-use crate::models::User;
+use crate::db::init_connection;
 use crate::models::NewComment;
+use crate::models::User;
+use crate::twitch::connect_to_twitch;
 
+mod db;
 mod models;
 mod schema;
+mod twitch;
 
 #[tokio::main]
-async fn main() -> Result<()>{
+async fn main() -> Result<()> {
     dotenv().ok();
+    let connection = init_connection();
 
-    let database_url = env::var("DATABASE_URL").expect("set DATABASE_URL");
-    let connection = PgConnection::establish(&database_url)
-        .unwrap_or_else(|_| panic!("Error connecting to {}", database_url));
-
-    let twitch_nickname = env::var("TWITCH_NICKNAME").unwrap();
-    let twitch_oauth = env::var("TWITCH_OAUTH").unwrap();
-
-    let irc_config = Config {
-        nickname: Some(twitch_nickname),
-        server: Some("irc.chat.twitch.tv".to_owned()),
-        port: Some(6667),
-        password: Some(twitch_oauth),
-        use_tls: Some(false),
-        ping_timeout: Some(10),
-        ping_time: Some(10),
-        channels: vec!["#penta".to_owned()],
-        
-        ..Default::default()
-    
-    };
-
-    let mut client = Client::from_config(irc_config).await?;
-
-
+    let mut client = connect_to_twitch().await?;
     client.identify()?;
-    client.send(Command::CAP(None, irc::proto::CapSubCommand::REQ, Some(":twitch.tv/tags".to_owned()), None))?;
 
+    client.send(Command::CAP(
+        None,
+        irc::proto::CapSubCommand::REQ,
+        Some(":twitch.tv/tags".to_owned()),
+        None,
+    ))?;
 
     let mut stream = client.stream()?;
 
     while let Some(message) = stream.next().await.transpose()? {
-
-
         if let Command::PRIVMSG(_, chat_message) = message.command {
             match message.prefix {
                 Some(p) => {
@@ -83,39 +65,34 @@ async fn main() -> Result<()>{
 
                                     if badges.contains("broadcaster") {
                                         is_broadcaster = true;
-                                    }
-                                    else if badges.contains("subscriber") {
+                                    } else if badges.contains("subscriber") {
                                         is_sub = true;
-                                    }
-                                    else if badges.contains("admin") {
+                                    } else if badges.contains("admin") {
                                         is_admin = true;
-                                    } 
-                                    else if badges.contains("vip") {
+                                    } else if badges.contains("vip") {
                                         is_vip = true;
-                                    }
-                                    else if badges.contains("moderator") {
+                                    } else if badges.contains("moderator") {
                                         is_mod = true;
-                                    }
-                                    else if badges.contains("partner") {
+                                    } else if badges.contains("partner") {
                                         is_partner = true;
                                     }
-                                    
-                                    let new_user: NewUser = NewUser { 
+
+                                    let new_user: NewUser = NewUser {
                                         username: (username),
                                         is_sub: (is_sub),
                                         is_partner: (is_partner),
                                         is_mod: (is_mod),
                                         is_vip: (is_vip),
                                         is_admin: (is_admin),
-                                        is_broadcaster: (is_broadcaster) 
+                                        is_broadcaster: (is_broadcaster),
                                     };
 
                                     let inserted_user = User::insert_user(new_user, &connection);
 
-                                    let new_comment =  NewComment {
+                                    let new_comment = NewComment {
                                         user_id: inserted_user[0].id,
                                         comment: chat_message,
-                                        created_at: SystemTime::now()
+                                        created_at: SystemTime::now(),
                                     };
 
                                     NewComment::insert_comment(new_comment, &connection);
@@ -123,26 +100,19 @@ async fn main() -> Result<()>{
                                     let new_comment = NewComment {
                                         user_id: user[0].id,
                                         comment: chat_message,
-                                        created_at: SystemTime::now() 
+                                        created_at: SystemTime::now(),
                                     };
 
                                     NewComment::insert_comment(new_comment, &connection);
                                 }
-
-                                
-
                             }
-                            None => println!("No tags")
+                            None => println!("No tags"),
                         }
                     }
- 
                 }
-                None => println!("None")
+                None => println!("None"),
             }
-
         }
-
-
     }
 
     Ok(())
